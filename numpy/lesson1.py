@@ -1,6 +1,4 @@
 import numpy as np
-arr1 = np.arange(10)
-cut = arr1[:3]
-print(cut)
-cut[0] = 100
-print(arr1)
+arr1 =np.random.normal(500,70,1000)
+print(np.where(arr1>650)[0])
+print(np.where(arr1==np.max(arr1)))
