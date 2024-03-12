@@ -1,30 +1,22 @@
-# Use a pipeline as a high-level helper
-from transformers import pipeline
+
 import os
-pipe = pipeline("text-generation", model="lmsys/vicuna-7b-v1.5")
+#
+# # 设置缓存目录到 D 盘
+# cache_dir = "D:/transformers_cache/"
+# os.environ["TRANSFORMERS_CACHE"] = cache_dir
 
-
-# 获取当前文件所在目录
-current_directory = os.path.dirname(os.path.realpath(__file__))
-
-# 组合模型参数文件的路径
-model_path = os.path.join(current_directory, "model")
-
-# Load model directly
+# # 确保缓存目录存在
+# os.makedirs(cache_dir, exist_ok=True)
 from transformers import AutoTokenizer, AutoModelForCausalLM
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
 tokenizer = AutoTokenizer.from_pretrained("lmsys/vicuna-7b-v1.5")
-model = AutoModelForCausalLM.from_pretrained("lmsys/vicuna-7b-v1.5",output_dir=model_path)
+model = AutoModelForCausalLM.from_pretrained("lmsys/vicuna-7b-v1.5")
+input_text = "Hello, I am a language model,"
+input_ids = tokenizer.encode(input_text, return_tensors="pt")
 
+output = model.generate(input_ids, max_length=50)
+generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
 
-# 输入文本
-text = "这是一个示例输入文本。"
-
-# 使用tokenizer将文本转换为模型输入格式
-inputs = tokenizer(text, return_tensors="pt")
-
-# 使用模型进行推理
-outputs = model(**inputs)
-
-# 获取分类结果
-logits = outputs.logits
+print(generated_text)
