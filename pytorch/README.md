@@ -793,5 +793,646 @@ tensor([[0.9987, 0.9998, 0.9983, 0.9993, 0.9993],
 
 
 
-# Demo
+# Demo：Word Window Classification
+
+1. Data: Creating a Dataset of Batched Tensors
+2. Modeling
+3. Training
+4. Prediction
+
+在本节中，我们的目标是训练一个模型，该模型将找到句子中与位置相对应的单词，这些位置始终是跨度1。我们的任务之所以称为**单词窗口分类**，是有原因的。我们不想让我们的模型在每次前向传播时只看一个单词，而是希望它能够考虑到问题单词的上下文。也就是说，对于每个单词，我们希望我们的模型能够意识到周围的单词。
+
+
+
+## Data
+
+在任何机器学习项目中的第一个任务是设置我们的训练集。通常，我们将使用一个训练语料库。在NLP任务中，语料库通常是一个.txt或.csv文件，其中每行对应一个句子或一个表格数据点。在我们的demo中，我们将假设我们已经将数据和相应的标签读入了一个Python列表。
+
+### Preprocessing 预处理
+
+为了使我们的模型更容易学习，我们通常会对数据进行一些预处理步骤。这在处理文本数据时尤其重要。以下是一些文本**预处理**的示例：
+
+- 分词：将句子分解为单词。
+- 小写化：将所有字母改为小写。
+- 去噪：去除特殊字符（如标点符号）。
+- 停用词去除：去除常用词。
+
+哪些预处理步骤是必要的取决于手头的任务。例如，尽管在某些任务中去除特殊字符是有用的，但在其他任务中它们可能很重要（例如，如果我们处理多种语言）。对于我们的任务，**我们将对单词进行小写化和分词**。
+
+```python
+def preprocess_sentence(sentence):
+  return sentence.lower().split()
+
+# Create our training set
+train_sentences = [preprocess_sentence(sent) for sent in corpus]  #Python 的列表推导式
+>>>
+[['we', 'always', 'come', 'to', 'paris'],
+ ['the', 'professor', 'is', 'from', 'australia'],
+ ['i', 'live', 'in', 'stanford'],
+ ['he', 'comes', 'from', 'taiwan'],
+ ['the', 'capital', 'of', 'turkey', 'is', 'ankara']]
+```
+
+对于我们每一个训练样例，我们也应该有一个相应的标签。回想一下我们模型的目标是确定哪些词对应于地点（LOCATION）。也就是说，我们希望我们的模型对所有不是地点的词输出0，对所有是地点的词输出1。
+
+这个标签用于在训练过程中指导模型学习。在机器学习中，模型通过比较其**预测输出和实际标签**来学习并调整其参数，以减少预测错误。
+
+```python
+# Set of locations that appear in our corpus
+locations = set(["australia", "ankara", "paris", "stanford", "taiwan", "turkey"])
+
+# Our train labels
+train_labels = [[1 if word in locations else 0 for word in sent] for sent in train_sentences]  #[]相当于取数组内部元素
+
+>>>
+[[0, 0, 0, 0, 1],
+ [0, 0, 0, 0, 1],
+ [0, 0, 0, 1],
+ [0, 0, 0, 1],
+ [0, 0, 0, 1, 0, 1]]
+```
+
+### Converting words to Embeddings
+
+我们正在讨论如何将训练数据中的单词转换为数字，以便机器学习模型可以处理它们。这是通过使用**嵌入（embeddings）**来实现的。
+
+嵌入是一种将单词转换为固定长度的实数向量的技术。这些向量捕获了单词之间的语义关系，使得语义相似的单词具有相似的嵌入表示。
+
+想象我们有一个嵌入查找表 E，其中每一行对应一个嵌入。也就是说，我们词汇表中的每个单词都有一个对应的嵌入行 i。每当我们想要找到一个单词的嵌入时，我们将遵循以下步骤：
+
+1. 找到单词在嵌入表中对应的索引 i：word->index。
+2. 索引到嵌入表并获取嵌入：index->embedding。
+
+第一步是将我们词汇表中的所有单词分配给一个对应的索引。我们可以按照以下方式进行：
+
+1. 找到我们语料库中所有唯一的单词。
+2. 为每个单词分配一个索引。
+
+这样，每个单词都有一个唯一的数字标识符，我们可以使用这个标识符在嵌入表中查找相应的嵌入向量。这是将文本数据转换为机器学习模型可以处理的数值数据的关键步骤。
+
+#### 生成词汇表 vocabulary
+
+```python
+# Find all the unique words in our corpus 
+vocabulary = set(w in s for train_sentences for w in s)
+#in s for train_sentences for w in s
+>>>
+{'always',
+ 'ankara',
+ 'australia',
+ 'capital',
+ 'come',
+ 'comes',
+ 'from',
+ 'he',
+ 'i',
+ 'in',
+ 'is',
+ 'live',
+ 'of',
+ 'paris',
+ 'professor',
+ 'stanford',
+ 'taiwan',
+ 'the',
+ 'to',
+ 'turkey',
+ 'we'}
+```
+
+<img src="README.assets/image-20240316142241188.png" alt="image-20240316142241188" style="zoom: 80%;" />
+
+#### 处理未知单词
+
+在这段文字中，提到了在测试时可能会遇到不在我们词汇表中的单词。为了让模型能够处理这些未知的单词，我们引入了一个特殊的标记 `<unk>`，代表“未知”。这样，即使在测试时遇到了词汇表之外的单词，模型仍然可以根据周围的单词来推理这个未知单词是否是一个地点（LOCATION）。
+
+我们需要确保这个特殊标记是唯一的，只用于表示未知的单词。同时，我们也会将这个特殊标记添加到我们的词汇表中。这样做的目的是让模型能够识别并处理那些在训练数据中没有出现过的单词。
+
+```python
+# Add the unknown token to our vocabulary
+vocabulary.add("<unk>")
+```
+
+#### 填充窗口
+
+在前面的内容中，我们提到我们的任务被称为“单词窗口分类”，因为我们的模型在做出预测时不仅要考虑给定的单词，还要考虑周围的单词。
+
+例如，让我们来看这个句子：“We always come to Paris”。这个句子对应的训练标签是 0, 0, 0, 0, 1，因为只有最后一个单词 Paris 是一个地点（LOCATION）。在一次传递（即一次调用 `forward()`）中，我们的模型将尝试为一个单词生成正确的标签。假设我们的模型正试图为 Paris 生成正确的标签 1。**如果我们只允许我们的模型看到 Paris，但没有其他的话，我们将错过一个重要的信息，即单词 to 经常出现在地点的前面**。
+
+单词窗口允许我们的模型在做出预测时考虑每个单词周围的 +N 或 -N 个单词。在我们之前的例子中，对于 Paris，如果我们有一个窗口大小为 1，这意味着我们的模型将查看紧挨着 Paris 的前后单词，即 to 和，空，这就引出了另一个问题。**Paris 在句子的末尾，所以它后面没有其他单词**。记住，当我们初始化我们的 PyTorch 模型时，我们定义了输入维度。如果我们将窗口大小设置为 1，这意味着我们的模型将在每次传递中接受 3 个单词。我们不能让我们的模型时不时地期待 2 个单词。
+
+解决方案是引入一个特殊的标记，比如 `<pad>`，它将被添加到我们的句子中，以确保每个单词周围都有一个有效的窗口。类似于 `<unk>` 标记，如果我们想的话，我们可以为我们的填充标记选择另一个字符串，只要我们确保它用于唯一的目的。
+
+```python
+# Add the <pad> token to our vocabulary
+vocabulary.add("<pad>")
+
+# Function that pads the given sentence
+# We are introducing this function here as an example
+# We will be utilizing it later in the tutorial
+def pad_window(sentence, window_size, pad_token="<pad>"):
+  window = [pad_token] * window_size
+  return window + sentence + window
+
+# Show padding example
+window_size = 2
+pad_window(train_sentences[0], window_size=window_size)
+```
+
+#### 生成word索引表
+
+现在我们要生成每个words的索引
+
+```python
+# We are just converting our vocabularly to a list to be able to index into it
+# Sorting is not necessary, we sort to show an ordered word_to_ind dictionary
+# That being said, we will see that having the index for the padding token
+# be 0 is convenient as some PyTorch functions use it as a default value
+# such as nn.utils.rnn.pad_sequence, which we will cover in a bit
+ix_to_word = sorted(list(vocabulary))
+
+# Creating a dictionary to find the index of a given word
+word_to_ix = {word:ind for ind,word in enumerate(ix_to_word)}
+```
+
+接下来我们根据word_to_ix将句子转换为对应的index索引
+
+```python
+#sentence是输入的句子，word_to_ix是我们已经有的单词-index索引表
+def convert_token_to_indices(sentence,word_to_ix):
+    indices = []
+    index = 0
+    for token in sentence:
+        if token in word_to_ix： #查找字典中的key对应的是word
+			index = word_to_ix[token]
+        else:
+            index = word_to_ix['<unk>']
+        indices.append(index)
+     return indices
+
+#更加紧凑的写法
+def convert_token_to_indices(sentence,word_to_ix):
+    return [word_to_ix.get(token,word_to_ix['<unk>'])for token in sentence]
+
+
+# Show an example
+example_sentence = ["we", "always", "come", "to", "kuwait"]
+example_indices = _convert_token_to_indices(example_sentence, word_to_ix)
+restored_example = [ix_to_word[ind] for ind in example_indices]
+
+print(f"Original sentence is: {example_sentence}")
+print(f"Going from words to indices: {example_indices}")
+print(f"Going from indices to words: {restored_example}")
+
+>>>
+Original sentence is: ['we', 'always', 'come', 'to', 'kuwait']
+Going from words to indices: [22, 2, 6, 20, 1]
+Going from indices to words: ['we', 'always', 'come', 'to', '<unk>']
+```
+
+#### 将我们训练数据转化为索引
+
+```python
+example_padded_indices = [_convert_token_to_indices(sentence,word_to_ix)for sentence in train_sentences]
+>>>
+[[22, 2, 6, 20, 15],
+ [19, 16, 12, 8, 4],
+ [10, 13, 11, 17],
+ [9, 7, 8, 18],
+ [19, 5, 14, 21, 12, 3]]
+```
+
+
+
+
+
+#### 生成嵌入层 embedding layer
+
+在我们的词汇表中为每个单词分配了索引后，我们可以使用 PyTorch 中的 `nn.Embedding` 类来创建一个嵌入表。它的调用方式如下：`nn.Embedding(num_words, embedding_dimension)`，其中 `num_words` 是词汇表中单词的数量，`embedding_dimension` 是我们希望拥有的嵌入的维度。
+
+`nn.Embedding` 并没有什么特别之处：它只是一个围绕一个可训练的 NxE 维张量的包装类，**其中 N 是词汇表中单词的数量，E 是嵌入维度的数量**。这个表最初是随机的，但它会随着时间的推移而改变。当我们训练我们的网络时，梯度会被反向传播到嵌入层，因此我们的单词嵌入会被更新。
+
+word->indx->embeddinglayer中的行向量
+
+```python
+embedding_dim = 5 
+embeds = nn.Embedding(len(vocabulary),embedding_dim)
+
+list(embeds.parameters())#随机生成的初始化embedding层
+>>>
+[Parameter containing:
+ tensor([[-0.5421,  0.6919,  0.8236, -1.3510,  1.4048],
+         [ 1.2983,  1.4740,  0.1002, -0.5475,  1.0871],
+         [ 1.4604, -1.4934, -0.4363, -0.3231, -1.9746],
+         [ 0.8021,  1.5121,  0.8239,  0.9865, -1.3801],
+         [ 0.3502, -0.5920,  0.9295,  0.6062, -0.6258],
+         [ 0.5038, -1.0187,  0.2860,  0.3231, -1.2828],
+         [ 1.5232, -0.5983, -0.4971, -0.5137,  1.4319],
+         [ 0.3826,  0.6501, -0.3948,  1.3998, -0.5133],
+         [-0.1728, -0.7658,  0.2873, -2.1812,  0.9506],
+         [-0.5617,  0.4552,  0.0618, -1.7503,  0.2192],
+         [-0.5405,  0.7887, -0.9843, -0.6110,  0.6391],
+         [ 0.6581, -0.7067,  1.3208,  1.3860, -1.5113],
+         [ 1.1594,  0.4977, -1.9175,  0.0916,  0.0085],
+         [ 0.3317,  1.8169,  0.0802, -0.1456, -0.7304],
+         [ 0.4997, -1.4895,  0.1237, -0.4121,  0.8909],
+         [ 0.6732,  0.4117, -0.5378,  0.6632, -2.7096],
+         [-0.4580, -0.9436, -1.6345,  0.1284, -1.6147],
+         [-0.3537,  1.9635,  1.0702, -0.1894, -0.8822],
+         [-0.4057, -1.2033, -0.7083,  0.4087, -1.1708],
+         [-0.6373,  0.5272,  1.8711, -0.5865, -0.7643],
+         [ 0.4714, -2.5822,  0.4338,  0.1537, -0.7650],
+         [-2.1828,  1.3178,  1.3833,  0.5018, -1.7209],
+         [-0.5354,  0.2153, -0.1482,  0.3903,  0.0900]], requires_grad=True)]
+```
+
+
+
+#### 生成嵌入层的查找张量 lookup tensor
+
+为了获取我们词汇表中某个单词的词嵌入，我们需要创建一个**查找张量（lookup tensor）**。查找张量只是一个包含我们想要查找的索引的张量。`nn.Embedding` 类期望一个索引张量，**这个张量应该是长整型张量（Long Tensor）**，因此我们应该相应地创建我们的张量。
+
+emample:
+
+```python
+index = word_to_ix['paris']
+index_ankara = word_to_ix['ankara']
+indices_tensor = torch.tensor([index,index_ankara],dtype=torch.long)
+embeddings = embeds(indices_tensor)
+>>>
+tensor([[ 0.6732,  0.4117, -0.5378,  0.6632, -2.7096],
+        [ 0.8021,  1.5121,  0.8239,  0.9865, -1.3801]],
+       grad_fn=<EmbeddingBackward>)
+```
+
+
+
+### Batching sentences
+
+在进行更新之前等待整个训练语料库被处理是代价高昂的。另一方面，每个训练样本后更新参数会导致更新之间的损失不够稳定。为了解决这些问题，**我们改为在训练一批数据后更新参数。**这样我们可以更好地估计全局损失的梯度。
+
+1. **批处理（Batching）**：为了平衡训练速度和损失稳定性，我们通常不会等待整个训练语料库被处理后再更新模型参数，也不会在每个训练样本后立即更新参数。相反，我们在处理一批数据后更新参数。这样可以更好地估计全局损失的梯度。
+2. **使用 `DataLoader`**：`DataLoader` 类用于创建批次。它的调用方式为 `DataLoader(data, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)`。其中，`batch_size` 参数确定每个批次中的样本数量。通过迭代 `DataLoader`，我们可以在每个epoch中处理所有批次。通过将 `shuffle` 参数设置为 `True`，我们可以确保批次的顺序是随机的，这有助于避免多次遇到不良批次。
+3. **自定义 `collate_fn`**：如果提供了 `collate_fn`，`DataLoader` 会将它准备的批次传递给这个函数。我们可以编写一个自定义函数来执行额外的处理，**例如打印批次的统计信息、窗口填充训练句子、将训练样本中的单词转换为索引、以及填充训练样本和标签使它们具有相同的长度。**在计算损失时，我们需要知道给定样本中实际的单词数量，因此我们也会在传递给 `collate_fn` 参数的函数中跟踪这个数量。
+4. **使用 `partial` 函数**：由于我们的 `collate_fn` 函数需要访问 `word_to_ix` 字典（以便将单词转换为索引），我们将使用 Python 中的 `partial` 函数，它允许我们将给定的参数传递给我们传递给它的函数。
+
+通过这种方式，我们可以有效地将数据组织成批次，并在训练过程中对模型进行更新。
+
+#### 处理数据
+
+```python
+from torch.utils.data import DataLoader
+from functools import partial
+from torch.utils.data import DataLoader
+from functools import partial
+
+def custom_collate_fn(batch, window_size, word_to_ix):
+  # 它用于将 batch 中的训练样本 (x) 和标签 (y) 分开
+  x, y = zip(*batch)
+  #补充窗口大小
+  def pad_window(sentence, window_size, pad_token="<pad>"):
+    window = [pad_token] * window_size
+    return window + sentence + window
+
+  # 给训练样例补充窗口大小
+  x = [pad_window(s, window_size=window_size) for s in x]
+
+  #定义word的索引表
+  def convert_tokens_to_indices(sentence, word_to_ix):
+    return [word_to_ix.get(token, word_to_ix["<unk>"]) for token in sentence]
+
+  # 将训练数据word转化为索引表
+  x = [convert_tokens_to_indices(s, word_to_ix) for s in x]
+
+  #记录pad的索引
+  pad_token_ix = word_to_ix["<pad>"]
+
+  # 生成x的张量矩阵 每一个元素是对应单词索引 每一行是对应句子的索引 有多行
+  x = [torch.LongTensor(x_i) for x_i in x]
+  #batch_first=True: 这个参数指定了输出张量的维度顺序。当设置为 True 时，输出张量的第一个维度是批次大小（即序列的数量），第二个维度是序列的最大长度。如果设置为 False（默认值），则第一个维度是序列的最大长度，第二个维度是批次大小。
+  #这里代表用pad的索引填充x，列长度为x中最长的元素长度，行长度为x行数
+  x_padded = nn.utils.rnn.pad_sequence(x, batch_first=True, padding_value=pad_token_ix)
+
+  #将每个句子标签长度记录成张量
+  lengths = [len(label) for label in y]
+  lenghts = torch.LongTensor(lengths)
+  #标签记录为张量并用0填充
+  y = [torch.LongTensor(y_i) for y_i in y]
+  y_padded = nn.utils.rnn.pad_sequence(y, batch_first=True, padding_value=0)
+
+ #返回处理后的训练样本、标签和每个样本中单词的实际数量。
+  return x_padded, y_padded, lenghts 
+```
+
+#### 使用Dataloader
+
+```python
+data = list(zip(train_sentences,train_labels))
+batch_size = 2
+shuffle = True
+window_size = 2
+#第二个第三个参数也是custom_collate_fn的第二个第三个参数
+collate_fn = 
+partial(custom_collate_fn,window_size=window_size,word_to_ix=word_to_ix)
+#第一个参数是custom_collate_fn的第一个参数
+#loader把collate_fn返回的样本按照两个进行分割
+loader = DataLoader(data,batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+
+counter = 0
+for batched_x, batched_y, batched_lengths in loader:
+  print(f"Iteration {counter}")
+  print("Batched Input:")
+  print(batched_x)
+  print("Batched Labels:")
+  print(batched_y)
+  print("Batched Lengths:")
+  print(batched_lengths)
+  print("")
+  counter += 1
+
+>>>
+]
+0 秒
+# Go through one loop
+counter = 0
+for batched_x, batched_y, batched_lengths in loader:
+  print(f"Iteration {counter}")
+  print("Batched Input:")
+  print(batched_x)
+  print("Batched Labels:")
+  print(batched_y)
+  print("Batched Lengths:")
+  print(batched_lengths)
+  print("")
+  counter += 1
+Iteration 0
+Batched Input:
+tensor([[ 0,  0, 19,  5, 14, 21, 12,  3,  0,  0],
+        [ 0,  0, 10, 13, 11, 17,  0,  0,  0,  0]])
+Batched Labels:
+tensor([[0, 0, 0, 1, 0, 1],
+        [0, 0, 0, 1, 0, 0]])
+Batched Lengths:
+tensor([6, 4])
+
+Iteration 1
+Batched Input:
+tensor([[ 0,  0, 19, 16, 12,  8,  4,  0,  0],
+        [ 0,  0, 22,  2,  6, 20, 15,  0,  0]])
+Batched Labels:
+tensor([[0, 0, 0, 0, 1],
+        [0, 0, 0, 0, 1]])
+Batched Lengths:
+tensor([5, 5])
+
+Iteration 2
+Batched Input:
+tensor([[ 0,  0,  9,  7,  8, 18,  0,  0]])
+Batched Labels:
+tensor([[0, 0, 0, 1]])
+Batched Lengths:
+tensor([4])
+```
+
+#### 窗口分类器
+
+1. **窗口分类器（Window Classifier）**：模型将对每个单词及其周围的单词（即窗口内的单词）进行分类，以判断中心单词是否是一个地点（LOCATION）。在这个例子中，模型需要为每个窗口做出预测，并将这些预测组合起来返回。
+2. **输入张量的格式**：目前，输入张量的格式是将一个句子中的所有单词放在一个数据点中。当这个输入传递给模型时，模型需要为每个单词创建一个窗口，并对每个窗口进行分类。
+3. **预先格式化数据**：为了避免模型需要在内部创建窗口的问题，我们可以事先将数据格式化为窗口。但在这个例子中，选择让模型来处理这个格式化过程。
+4. **窗口大小（window_size）**：给定窗口大小为 N，**我们希望模型在每 2N+1 个标记上做出预测**。例如，如果输入有 9 个标记，窗口大小为 2，则模型应该返回 5 个预测。这是因为在填充了每侧 2 个标记之前，输入也包含了 5 个标记。
+5. **创建窗口**：可以使用 for 循环来创建窗口，但 PyTorch 提供了一个更快的替代方法，即 `unfold(dimension, size, step)` 方法。可以使用这个方法按如下方式创建所需的窗口：
+
+```python
+# Print the original tensor
+print(f"Original Tensor: ")
+print(batched_x)
+print("")
+
+# Create the 2 * 2 + 1 chunks
+chunk = batched_x.unfold(1, window_size*2 + 1, 1)
+print(f"Windows: ")
+print(chunk)
+>>>
+Original Tensor: 
+tensor([[ 0,  0,  9,  7,  8, 18,  0,  0]])
+
+Windows: 
+tensor([[[ 0,  0,  9,  7,  8],
+         [ 0,  9,  7,  8, 18],
+         [ 9,  7,  8, 18,  0],
+         [ 7,  8, 18,  0,  0]]])
+```
+
+
+
+## Model
+
+### 自定义模型
+
+```python
+class WordWindowClassifier(nn.module)
+	#创建时输入超参数，词汇表大小，embedd默认值
+	def __init__(self,hyperparameters,vocab_size,pad_ix=0)
+    	 """ 初始化参数 """
+    self.window_size = hyperparameters["window_size"]
+    self.embed_dim = hyperparameters["embed_dim"]
+    self.hidden_dim = hyperparameters["hidden_dim"]
+    self.freeze_embeddings = hyperparameters["freeze_embeddings"]
+    
+    """ Embedding Layer 
+    Takes in a tensor containing embedding indices, and returns the 
+    corresponding embeddings. The output is of dim 
+    (number_of_indices * embedding_dim).
+
+    freeze_embeddings 如果是true代表不能更改嵌入层，有时候很有用，比如当我们只希望改变除了嵌入参数以外的其他参数时
+    """##索引大于等于 vocab_size 的单词，将会引发索引越界错误。这就是 vocab_size 在嵌入层中的作用。embed_dim就是将一个元素变成长度为embed_dim的向量
+    self.embeds = nn.Embedding(vocab_size, self.embed_dim, padding_idx=pad_ix)
+    if self.freeze_embeddings:
+      self.embed_layer.weight.requires_grad = False#禁止更新梯度
+    
+    #隐藏层  函数处理
+    #定义预测窗口大小 2N+1
+    full_window_size = 2*window_size+1
+    self.hidden_layer = nn.Sequential(
+    	nn.Liner(full_window_size*self.embed_dim,self.hidden_dim)
+        #full_window_size * self.embed_dim。例如，如果窗口大小为 2（即考虑中心词的前后各两个单词），嵌入维度为 5，那么输入向量的维度就是 (2*2 + 1) * 5 = 25。
+        nn.Tanh()
+    )
+    
+    """ Output Layer
+    """
+    self.output_layer = nn.Linear(self.hidden_dim, 1)
+
+    """ Probabilities 
+    """
+    self.probabilities = nn.Sigmoid()
+    
+    def forward(self,inputs):
+        #B：批次大小（batch size）。
+		#L：窗口填充后的句子长度（window-padded sentence length）。
+		#D：嵌入维度（embedding dimension）。
+		#S：窗口大小（window size）。
+		#H：隐藏层维度（hidden dimension）
+        B,L = inputs.size() #input是个索引矩阵 每个元素是word索引
+        #1.拿到我们文字窗口
+        token_windows = inputs.unfold(1,2*self.window_size+1,1)#三位数组，第一个参数代表第几个句子，第二个参数代表第几个窗口，第三个参数代表word具体元素
+        _,adjusted_length,_=token_windows.size() #拿到对应句子分成几个窗口，其实句子长度相同因为都填充过
+        
+        # Good idea to do internal tensor-size sanity checks, at the least in comments!
+    	assert token_windows.size() == (B, adjusted_length, 2 * self.window_size + 1)
+       
+    ##Takes in a torch.LongTensor of size (B, L~, S) 
+    ##Outputs a (B, L~, S, D) FloatTensor.
+    embedded_windows = self.embeds(token_windows)
+    
+    """
+    Reshaping.
+   接下来，embedded_windows 被重塑（reshaped）为一个三维张量，形状为 (B, L~, S*D)。这是通过 .view() 方法实现的，它允许我们改变张量的形状而不改变其数据。
+S*D 是新的第三维度，它是窗口大小和嵌入维度的乘积。这意味着每个窗口中的所有嵌入向量被展平（flattened）成一个长向量。
+    """
+    embedded_windows = embedded_windows.view(B, adjusted_length, -1)
+      """
+    Layer 1.
+    Takes in a (B, L~, S*D) FloatTensor.
+    Resizes it into a (B, L~, H) FloatTensor
+    """
+    layer_1 = self.hidden_layer(embedded_windows)
+
+    """
+    Layer 2
+    Takes in a (B, L~, H) FloatTensor.
+    Resizes it into a (B, L~, 1) FloatTensor.
+    """
+    output = self.output_layer(layer_1)
+
+    """
+    Softmax.
+    Takes in a (B, L~, 1) FloatTensor of unnormalized class scores.
+    Outputs a (B, L~, 1) FloatTensor of (log-)normalized class scores.
+    """
+    output = self.probabilities(output)
+    output = output.view(B, -1)
+
+    return output
+        
+```
+
+```python
+举个例子，如果批次大小 B = 2，调整后的句子长度 L~ = 3，则输出张量可能如下所示：
+[[0.1, 0.8, 0.3],  # 第一个句子中每个窗口中心单词是地点的预测概率
+ [0.2, 0.9, 0.4]]  # 第二个句子中每个窗口中心单词是地点的预测概率
+```
+
+
+
+
+
+## Training
+
+```python
+# Prepare the data
+data = list(zip(train_sentences, train_labels))
+batch_size = 2
+shuffle = True
+window_size = 2
+collate_fn = partial(custom_collate_fn, window_size=window_size, word_to_ix=word_to_ix)
+
+# Instantiate a DataLoader
+loader = DataLoader(data, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+
+# Initialize a model
+# It is useful to put all the model hyperparameters in a dictionary
+model_hyperparameters = {
+    "batch_size": 4,
+    "window_size": 2,
+    "embed_dim": 25,
+    "hidden_dim": 25,
+    "freeze_embeddings": False,
+}
+
+vocab_size = len(word_to_ix)
+model = WordWindowClassifier(model_hyperparameters, vocab_size)
+
+# Define an optimizer
+learning_rate = 0.01
+optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+
+# Define a loss function, which computes to binary cross entropy loss
+def loss_function(batch_outputs, batch_labels, batch_lengths):   
+    # Calculate the loss for the whole batch
+    bceloss = nn.BCELoss()
+    loss = bceloss(batch_outputs, batch_labels.float())
+
+    # Rescale the loss. Remember that we have used lengths to store the 
+    # number of words in each training example
+    loss = loss / batch_lengths.sum().float()  #由于我们的损失是在一个批次的所有输出上计算的，我们需要对损失进行缩放，以考虑实际的单词数量，而不是包括填充的总长度。为此，我们使用 batch_lengths.sum().float() 计算批次中所有句子的实际单词总数，并将损失除以这个数值。
+
+    return loss
+```
+
+```python
+# Function that will be called in every epoch
+def train_epoch(loss_function, optimizer, model, loader):
+  
+  # Keep track of the total loss for the batch
+  total_loss = 0
+  for batch_inputs, batch_labels, batch_lengths in loader:
+    # Clear the gradients
+    optimizer.zero_grad()
+    # Run a forward pass
+    outputs = model.forward(batch_inputs)
+    # Compute the batch loss
+    loss = loss_function(outputs, batch_labels, batch_lengths)
+    # Calculate the gradients
+    loss.backward()
+    # Update the parameteres
+    optimizer.step()
+    total_loss += loss.item()  ##分批次的和
+
+  return total_loss
+
+
+# Function containing our main training loop
+def train(loss_function, optimizer, model, loader, num_epochs=10000):
+
+  # Iterate through each epoch and call our train_epoch function
+  for epoch in range(num_epochs):
+    epoch_loss = train_epoch(loss_function, optimizer, model, loader)
+    if epoch % 100 == 0: print(epoch_loss)
+```
+
+
+
+
+
+## 预测
+
+```python
+# Create test sentences
+test_corpus = ["She comes from Paris"]
+test_sentences = [s.lower().split() for s in test_corpus]
+test_labels = [[0, 0, 0, 1]]
+
+# Create a test loader
+test_data = list(zip(test_sentences, test_labels))
+batch_size = 1
+shuffle = False
+window_size = 2
+collate_fn = partial(custom_collate_fn, window_size=2, word_to_ix=word_to_ix)
+test_loader = torch.utils.data.DataLoader(test_data, 
+                                           batch_size=1, 
+                                           shuffle=False, 
+                                           collate_fn=collate_fn)
+```
+
+```python
+for test_instance, labels, _ in test_loader:
+  outputs = model.forward(test_instance)
+  print(labels)
+  print(outputs)
+>>>
+tensor([[0, 0, 0, 1]])
+tensor([[0.0218, 0.5462, 0.1497, 0.9696]], grad_fn=<ViewBackward0>)
+
+```
 
