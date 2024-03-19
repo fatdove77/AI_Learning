@@ -1151,7 +1151,6 @@ for batched_x, batched_y, batched_lengths in loader:
   counter += 1
 
 >>>
-]
 0 秒
 # Go through one loop
 counter = 0
@@ -1274,8 +1273,9 @@ class WordWindowClassifier(nn.module)
 		#S：窗口大小（window size）。
 		#H：隐藏层维度（hidden dimension）
         B,L = inputs.size() #input是个索引矩阵 每个元素是word索引
-        #1.拿到我们文字窗口
-        token_windows = inputs.unfold(1,2*self.window_size+1,1)#三位数组，第一个参数代表第几个句子，第二个参数代表第几个窗口，第三个参数代表word具体元素
+        #1.拿到我们文字窗口 1代表维度 以第二个维度展开也就是列方向，1代表是每次移动窗口位置 ji
+        token_windows = inputs.unfold(1,2*self.window_size+1,1)
+        #三位数组，第一个参数代表第几个句子，第二个参数代表第几个窗口，第三个参数代表word具体元素
         _,adjusted_length,_=token_windows.size() #拿到对应句子分成几个窗口，其实句子长度相同因为都填充过
         
         # Good idea to do internal tensor-size sanity checks, at the least in comments!
